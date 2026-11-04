@@ -496,6 +496,19 @@ _AP_STA_RE = re.compile(r"AP-STA-(CONNECTED|DISCONNECTED)\s+"
                         r"([0-9a-fA-F:]{17})")
 
 
+def _lease_ip(mac):
+    """IP dnsmasq has leased to `mac`, or None. Lease line: expiry mac ip host id."""
+    try:
+        with open(DNSMASQ_LEASES) as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3 and parts[1].lower() == mac:
+                    return parts[2]
+    except OSError:
+        pass
+    return None
+
+
 def _start_hostapd_watcher():
     """Raise station events from hostapd, not from DHCP lease expiry.
 
@@ -520,7 +533,14 @@ def _start_hostapd_watcher():
                         if not m:
                             continue
                         kind, mac = m.group(1), m.group(2).lower()
-                        if kind == "DISCONNECTED":
+                        if kind == "CONNECTED":
+                            # A DUT rejoining with an unchanged lease gets no
+                            # dnsmasq event, so track it from association.
+                            # Only the station table: STA_CONNECT stays the
+                            # lease event, which carries the IP.
+                            _stations.setdefault(
+                                mac, {"mac": mac, "ip": _lease_ip(mac)})
+                        elif kind == "DISCONNECTED":
                             _stations.pop(mac, None)
                             _event_queue.put({"type": "STA_DISCONNECT",
                                               "mac": mac})
