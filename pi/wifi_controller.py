@@ -67,6 +67,7 @@ VERSION = "1.0.0-pi"
 
 _lock = threading.Lock()
 _ap_active = False
+_watcher_gen = 0
 _ap_ssid = ""
 _ap_password = ""
 _ap_channel = 0
@@ -522,9 +523,16 @@ def _start_hostapd_watcher():
     Watching the log is possible only because hostapd now writes to a file;
     it used to write into a pipe nobody read.
     """
+    global _watcher_gen
+    # ap_stop/ap_start inside the poll interval would leave the old thread
+    # alive next to the new one, each reporting every station event. Only the
+    # newest generation keeps running.
+    _watcher_gen += 1
+    gen = _watcher_gen
+
     def run():
         pos = 0
-        while _ap_active:
+        while _ap_active and gen == _watcher_gen:
             try:
                 with open(HOSTAPD_LOG) as f:
                     f.seek(pos)
