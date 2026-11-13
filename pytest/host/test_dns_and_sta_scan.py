@@ -118,6 +118,18 @@ def test_fr039_parses_protocol(value, want):
     assert ns.parse_protocol(value) == want
 
 
+@pytest.mark.parametrize("protocol,states,want", [
+    ("tcp", ["silent", "open"], "open"),            # a dropped SYN must not hide an open port
+    ("tcp", ["silent", "silent", "silent"], "silent"),
+    ("tcp", ["closed"], "closed"),
+    ("udp", ["silent", "closed"], "closed"),        # a dropped datagram must not show a closed port open
+    ("udp", ["silent", "silent", "silent"], "open"),  # open or filtered
+    ("udp", ["open"], "open"),
+])
+def test_fr039_an_answer_outranks_silence(protocol, states, want):
+    assert ns.classify(protocol, states) == want
+
+
 @pytest.mark.parametrize("value", ["icmp", "TCP", "", 1])
 def test_fr039_rejects_unknown_protocol(value):
     with pytest.raises(ValueError):

@@ -11,6 +11,7 @@ does not depend on the WiFi controller.
 """
 
 import concurrent.futures
+import errno
 import ipaddress
 import logging
 import socket
@@ -22,9 +23,13 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 
-MAX_IN_FLIGHT = 128
+MAX_IN_FLIGHT = 128       # TCP first pass
+UDP_IN_FLIGHT = 16        # UDP first pass: a small DUT drops datagrams it cannot buffer and then sends no ICMP
+RETRY_IN_FLIGHT = 4       # re-probes of ports that stayed silent
+RETRIES = 2               # extra probes for a silent port before its silence counts
 CONNECT_TIMEOUT_S = 1.0
 UDP_WAIT_S = 1.0          # wait for ICMP port unreachable after one datagram
+OPEN, CLOSED, SILENT = "open", "closed", "silent"
 PROTOCOLS = ("tcp", "udp")
 DEFAULT_PORTS = "1-65535"
 DEFAULT_TIMEOUT_S = 120.0
@@ -123,43 +128,56 @@ def clamp_timeout(value) -> float:
 # ---------------------------------------------------------------------------
 
 
-def _accepts(host: str, port: int) -> bool:
+def _tcp_probe(host: str, port: int) -> str:
+    """OPEN on a completed connect, CLOSED on a refusal (RST), SILENT when nothing came back in time."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(CONNECT_TIMEOUT_S)
-        return s.connect_ex((host, port)) == 0
+        rc = s.connect_ex((host, port))
+    if rc == 0:
+        return OPEN
+    # Only a refusal is the port's answer; a timeout or an unreachable host (ARP lost under load) is not.
+    return CLOSED if rc == errno.ECONNREFUSED else SILENT
 
 
-def _udp_open(host: str, port: int) -> bool:
+def _udp_probe(host: str, port: int) -> str:
     """One datagram to a connected UDP socket. A closed port answers with ICMP port unreachable, which Linux
-    reports as ConnectionRefusedError on the socket; no answer within UDP_WAIT_S counts as open (open or
-    filtered — UDP cannot tell them apart), a reply as open."""
+    reports as ConnectionRefusedError on the socket (CLOSED); a reply is OPEN; no answer within UDP_WAIT_S is
+    SILENT — open or filtered, or the datagram was dropped."""
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.settimeout(UDP_WAIT_S)
         s.connect((host, port))
         try:
             s.send(b"\x00")
             s.recv(512)
-            return True
+            return OPEN
         except ConnectionRefusedError:
-            return False
+            return CLOSED
         except socket.timeout:
-            return True
+            return SILENT
 
 
-def scan(host: str, ports: list, timeout_s: float, protocol: str = "tcp") -> dict:
-    """Check `ports` on an already validated `host` within timeout_s (TCP connect or UDP probe)."""
-    probe = _udp_open if protocol == "udp" else _accepts
-    start = time.monotonic()
-    deadline = start + timeout_s
-    open_ports = []
-    scanned = 0
+def classify(protocol: str, states: list) -> str:
+    """Fold the answers one port gave across its probes into the reported verdict.
+
+    An answer outranks silence: one OPEN makes the port open, one CLOSED (RST / ICMP unreachable) makes it
+    closed — a dropped probe is silent, never an answer. Only a port silent on every probe stays SILENT,
+    which TCP reports as not open and UDP as open (open or filtered: UDP cannot tell them apart)."""
+    if OPEN in states:
+        return OPEN
+    if CLOSED in states:
+        return CLOSED
+    return OPEN if protocol == "udp" else SILENT
+
+
+def _pass(probe, host: str, ports: list, limit: int, deadline: float, wait_s: float) -> dict:
+    """Probe each port once, at most `limit` at a time, until the budget would be overrun.
+    Returns {port: state} for the ports that were probed."""
+    states = {}
     pending = iter(ports)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_IN_FLIGHT) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=limit) as pool:
         in_flight = {}
         while True:
-            # Keep the pool full until the budget would be overrun.
-            while (len(in_flight) < MAX_IN_FLIGHT
-                   and time.monotonic() + CONNECT_TIMEOUT_S <= deadline):
+            while len(in_flight) < limit and time.monotonic() + wait_s <= deadline:
                 port = next(pending, None)
                 if port is None:
                     break
@@ -167,18 +185,46 @@ def scan(host: str, ports: list, timeout_s: float, protocol: str = "tcp") -> dic
             if not in_flight:
                 break
             done, _ = concurrent.futures.wait(
-                in_flight, timeout=max(0.0, deadline - time.monotonic()) + CONNECT_TIMEOUT_S,
+                in_flight, timeout=max(0.0, deadline - time.monotonic()) + wait_s,
                 return_when=concurrent.futures.FIRST_COMPLETED)
             if not done:
                 break
             for fut in done:
-                port = in_flight.pop(fut)
-                scanned += 1
-                if fut.result():
-                    open_ports.append(port)
-    complete = scanned == len(ports)
+                states[in_flight.pop(fut)] = fut.result()
+    return states
+
+
+def scan(host: str, ports: list, timeout_s: float, protocol: str = "tcp") -> dict:
+    """Check `ports` on an already validated `host` within timeout_s (TCP connect or UDP probe).
+
+    A first pass probes every port; every port that stayed silent is probed again, RETRIES times, a few at a
+    time. A small DUT flooded with probes drops some of them and answers nothing, so one silent probe is no
+    verdict: the retries are what keep a dropped SYN from hiding an open TCP port and a dropped datagram from
+    showing a closed UDP port as open."""
+    udp = protocol == "udp"
+    probe = _udp_probe if udp else _tcp_probe
+    wait_s = UDP_WAIT_S if udp else CONNECT_TIMEOUT_S
+    start = time.monotonic()
+    deadline = start + timeout_s
+    seen = {p: [s] for p, s in _pass(probe, host, ports, UDP_IN_FLIGHT if udp else MAX_IN_FLIGHT,
+                                       deadline, wait_s).items()}
+    retried = 0
+    for _ in range(RETRIES):
+        silent = [p for p in sorted(seen) if all(s == SILENT for s in seen[p])]
+        if not silent:
+            break
+        again = _pass(probe, host, silent, RETRY_IN_FLIGHT, deadline, wait_s)
+        retried += len(again)
+        for p, s in again.items():
+            seen[p].append(s)
+        if len(again) < len(silent):
+            break  # budget spent
+    verdicts = {p: classify(protocol, s) for p, s in seen.items()}
+    open_ports = sorted(p for p, v in verdicts.items() if v == OPEN)
+    silent_ports = sorted(p for p, s in seen.items() if all(x == SILENT for x in s))
+    complete = len(seen) == len(ports)
     elapsed = round(time.monotonic() - start, 1)
-    logger.info("portscan %s %s: %d/%d ports, open=%s, complete=%s",
-                protocol, host, scanned, len(ports), sorted(open_ports), complete)
-    return {"host": host, "protocol": protocol, "open": sorted(open_ports), "scanned": scanned,
-            "complete": complete, "elapsed_s": elapsed}
+    logger.info("portscan %s %s: %d/%d ports, open=%s, silent=%d, retried=%d, complete=%s",
+                protocol, host, len(seen), len(ports), open_ports, len(silent_ports), retried, complete)
+    return {"host": host, "protocol": protocol, "open": open_ports, "silent": silent_ports,
+            "scanned": len(seen), "retried": retried, "complete": complete, "elapsed_s": elapsed}

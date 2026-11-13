@@ -2043,6 +2043,12 @@ observe.
   unreachable; a port without that answer within 1 s is reported in `open`,
   which for UDP means *open or filtered* — the protocol cannot tell them
   apart. The answer carries `"protocol": "udp"`.
+- A small DUT flooded with probes drops some of them and answers nothing. One
+  silent probe is therefore no verdict: every port that stayed silent is
+  probed again, twice, four at a time, and an answer (connect, RST, ICMP
+  unreachable, a reply) outranks silence. The first UDP pass runs 16 probes at
+  a time. The answer lists the ports silent on every probe in `silent` (for
+  TCP: filtered, not open) and the number of re-probes in `retried`.
 - At most 128 connection attempts are in flight at once, each with a 1 s
   connect timeout.
 
@@ -2064,6 +2070,8 @@ wt.net_portscan("192.168.4.15", ports="1-65535", timeout_s=120)
 | FR-039 | Station mode without a gateway · validate any target | Refused | A scan |
 | FR-039 | `protocol` `"tcp"`, `"udp"`, absent, `"icmp"` · parse | `tcp`, `udp`, `tcp`; the last rejected | An unknown protocol accepted |
 | FR-039 | A host with one UDP listener · UDP scan of its port and closed ones | `open` lists exactly the listener | A port that answered ICMP unreachable reported open |
+| FR-039 | Probe answers per port: TCP silent then open; UDP silent then closed; all silent | TCP open; UDP closed; TCP not open, UDP open | A dropped probe deciding the verdict |
+| FR-039 | An ESP32 soft-AP serving TCP 80, UDP 53 and 67 · full TCP scan, UDP scan 1–200 | TCP `open: [80]`; UDP `open: [53, 67]` | Port 80 missing; closed UDP ports reported open |
 
 ### FR-040 — DNS Query over the Radio
 
@@ -3800,7 +3808,7 @@ Add `--run-dut` to include tests that require a WiFi device under test.
 | 9.3 | 2026-07-05 | Claude | Captive-portal provisioning + LAN bridge, verified against a WiFiManager DUT. `enter-portal` parameterized for arbitrary portal forms (WiFiManager `/wifisave`, `s`/`p` + `extra` MQTT fields) with an `internet` option; AP mode gains NAT bridging to `eth0` (`ap_start internet=true`, FR-011) so a provisioned DUT reaches the LAN/internet; MQTT broker wired to the API (FR-029, `/api/mqtt/*`, `mqtt_controller.py`). SDR (FR-028) gains a `flex` `-X` custom-decoder param and `-M level` rssi/snr signal-vs-noise reporting. Test cases WT-1906–1908 (SDR flex/RSSI, RF path), WT-2000–2002 (broker), WT-2100–2102 (captive-portal provisioning). |
 | 9.4 | 2026-07-05 | Claude | SDR (FR-028) gains: fixed-gain (`-g`) + `peak_freq_hz`/`notch_hz` on power; phased `acquire` (locate→level→decode→classify) with `tools/sdr_acquire.py` CLI and live activity-log prompts; the interactive **live console** (persistent `rtl_433`, ring-buffer fast-poll `/api/sdr/live*`, RSSI meter, presets, `-A` in every mode so the signal meter is decode-independent); **AI Sherlock** session log (`/api/sdr/log*`) for AI reverse-engineering of unknown remotes; USB self-heal + `/api/sdr/reset`; and an `rtl_433` device database (`pi/config/rtl_433.conf`) shipping one worked-example decoder. New skill `sdr-receiver`. |
 | 9.5 | 2026-08-03 | Claude | MCP surface completed to 70 tools — added `firmware_upload/delete`, `udplog_get/clear`, `debug_group`, `test_update`, `wifi_events`, `human_interaction/done/cancel`; `DELETE` added as a transport method. Only the two udev callbacks (`/api/hotplug`, `/api/wifi/lease_event`) remain unexposed. |
-| 10.1 | 2026-11-13 | Claude | Findings from a project's DUT testing (ESP32-S3 captive-portal lift controller): FR-040 DNS query over the radio (new, `dns_probe.py`) — the relay resolves names through `eth0`, so a DUT's DNS server was unobservable; FR-014 relay gains `follow_redirects: false` so a 302 is visible; FR-039 port scan accepts the joined AP in station mode and gains `protocol: udp` (a DUT that *is* the AP at 192.168.4.1 was refused as "the testbench itself"); serial ring buffer 1000 → 10 000 lines per slot (1000 lines covered ~5 min of a busy DUT log); `install.sh` unblocks the WLAN radio, not only Bluetooth. MCP 75 tools (`wifi_dns`). |
+| 10.1 | 2026-11-13 | Claude | Findings from a project's DUT testing (ESP32-S3 captive-portal lift controller): FR-040 DNS query over the radio (new, `dns_probe.py`) — the relay resolves names through `eth0`, so a DUT's DNS server was unobservable; FR-014 relay gains `follow_redirects: false` so a 302 is visible; FR-039 port scan accepts the joined AP in station mode and gains `protocol: udp`, and re-probes silent ports (a flooded ESP32 dropped probes: a full TCP scan missed port 80, a UDP scan reported 50 closed ports open) (a DUT that *is* the AP at 192.168.4.1 was refused as "the testbench itself"); serial ring buffer 1000 → 10 000 lines per slot (1000 lines covered ~5 min of a busy DUT log); `install.sh` unblocks the WLAN radio, not only Bluetooth. MCP 75 tools (`wifi_dns`). |
 | 10.0 | 2026-08-03 | Claude | Documentation consolidated to two documents: this FSD (WHAT) and the User Manual (HOW). The separate user manual, WiFi HTTP manual, skill-testing guide, and the `pi/` and `mcp/` READMEs merged into `Harness-User-Manual.md`; root `README.md` reduced to a landing page. FSD sections regrouped by subsystem — FR-017–FR-021 out of "WiFi Service" into §5, BLE + MQTT into §6, the three GDB specs into §7, signal generator + SDR into §8, and the MCP interface promoted out of FR-006 into §9. FR numbers and clause text unchanged. |
 
 ---
