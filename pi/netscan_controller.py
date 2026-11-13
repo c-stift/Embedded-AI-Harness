@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 MAX_IN_FLIGHT = 128
 CONNECT_TIMEOUT_S = 1.0
+UDP_WAIT_S = 1.0          # wait for ICMP port unreachable after one datagram
+PROTOCOLS = ("tcp", "udp")
 DEFAULT_PORTS = "1-65535"
 DEFAULT_TIMEOUT_S = 120.0
 MIN_TIMEOUT_S = 1.0
@@ -95,6 +97,15 @@ def parse_ports(spec) -> list:
     return sorted(ports)
 
 
+def parse_protocol(value) -> str:
+    """"tcp" (default) or "udp"; anything else is refused."""
+    if value is None:
+        return "tcp"
+    if value not in PROTOCOLS:
+        raise ValueError(f"protocol must be one of {PROTOCOLS}")
+    return value
+
+
 def clamp_timeout(value) -> float:
     """The total budget in seconds, within MIN_TIMEOUT_S..MAX_TIMEOUT_S."""
     if value is None:
@@ -118,8 +129,26 @@ def _accepts(host: str, port: int) -> bool:
         return s.connect_ex((host, port)) == 0
 
 
-def scan(host: str, ports: list, timeout_s: float) -> dict:
-    """Connect-check `ports` on an already validated `host` within timeout_s."""
+def _udp_open(host: str, port: int) -> bool:
+    """One datagram to a connected UDP socket. A closed port answers with ICMP port unreachable, which Linux
+    reports as ConnectionRefusedError on the socket; no answer within UDP_WAIT_S counts as open (open or
+    filtered — UDP cannot tell them apart), a reply as open."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.settimeout(UDP_WAIT_S)
+        s.connect((host, port))
+        try:
+            s.send(b"\x00")
+            s.recv(512)
+            return True
+        except ConnectionRefusedError:
+            return False
+        except socket.timeout:
+            return True
+
+
+def scan(host: str, ports: list, timeout_s: float, protocol: str = "tcp") -> dict:
+    """Check `ports` on an already validated `host` within timeout_s (TCP connect or UDP probe)."""
+    probe = _udp_open if protocol == "udp" else _accepts
     start = time.monotonic()
     deadline = start + timeout_s
     open_ports = []
@@ -134,7 +163,7 @@ def scan(host: str, ports: list, timeout_s: float) -> dict:
                 port = next(pending, None)
                 if port is None:
                     break
-                in_flight[pool.submit(_accepts, host, port)] = port
+                in_flight[pool.submit(probe, host, port)] = port
             if not in_flight:
                 break
             done, _ = concurrent.futures.wait(
@@ -149,7 +178,7 @@ def scan(host: str, ports: list, timeout_s: float) -> dict:
                     open_ports.append(port)
     complete = scanned == len(ports)
     elapsed = round(time.monotonic() - start, 1)
-    logger.info("portscan %s: %d/%d ports, open=%s, complete=%s",
-                host, scanned, len(ports), sorted(open_ports), complete)
-    return {"host": host, "open": sorted(open_ports), "scanned": scanned,
+    logger.info("portscan %s %s: %d/%d ports, open=%s, complete=%s",
+                protocol, host, scanned, len(ports), sorted(open_ports), complete)
+    return {"host": host, "protocol": protocol, "open": sorted(open_ports), "scanned": scanned,
             "complete": complete, "elapsed_s": elapsed}

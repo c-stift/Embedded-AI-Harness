@@ -2019,6 +2019,7 @@ observe.
 | host | string | required | AP mode: a single IPv4 address inside the AP subnet (`192.168.4.0/24`), not the Pi's own AP address. Station mode: the AP the bench joined (its gateway) |
 | ports | string | `"1-65535"` | Comma-separated ports and ranges, e.g. `"22,80,1000-2000"`; each 1–65535 |
 | timeout_s | number | 120 | Total time budget, 1–600 s |
+| protocol | string | `"tcp"` | `tcp` (connect check) or `udp` (one datagram per port) |
 
 **Response:**
 ```json
@@ -2036,8 +2037,12 @@ observe.
   and the bench's own station address, is refused. Anything else — a LAN address, a hostname, a network range, the
   broadcast or network address — is refused with 400 and no connection
   attempt. The bench cannot be used to probe the owner's LAN.
-- Each port is checked with a plain TCP connect (connect, then close). No
-  data is sent, no service is identified, no other protocol is used.
+- TCP: each port is checked with a plain TCP connect (connect, then close).
+  No data is sent, no service is identified.
+- UDP: one one-byte datagram per port. A closed port answers with ICMP port
+  unreachable; a port without that answer within 1 s is reported in `open`,
+  which for UDP means *open or filtered* — the protocol cannot tell them
+  apart. The answer carries `"protocol": "udp"`.
 - At most 128 connection attempts are in flight at once, each with a 1 s
   connect timeout.
 
@@ -2057,6 +2062,8 @@ wt.net_portscan("192.168.4.15", ports="1-65535", timeout_s=120)
 | FR-039 | Budget shorter than the scan needs | `complete: false`, answer within budget + 2 s | The request running past its budget |
 | FR-039 | Station mode, joined AP `192.168.4.1`, own address `192.168.4.2` · validate `192.168.4.1`, `192.168.4.2`, `192.168.4.3`, `192.168.0.10` | Only the first is accepted | The bench's own address or another host accepted |
 | FR-039 | Station mode without a gateway · validate any target | Refused | A scan |
+| FR-039 | `protocol` `"tcp"`, `"udp"`, absent, `"icmp"` · parse | `tcp`, `udp`, `tcp`; the last rejected | An unknown protocol accepted |
+| FR-039 | A host with one UDP listener · UDP scan of its port and closed ones | `open` lists exactly the listener | A port that answered ICMP unreachable reported open |
 
 ### FR-040 — DNS Query over the Radio
 
@@ -3793,7 +3800,7 @@ Add `--run-dut` to include tests that require a WiFi device under test.
 | 9.3 | 2026-07-05 | Claude | Captive-portal provisioning + LAN bridge, verified against a WiFiManager DUT. `enter-portal` parameterized for arbitrary portal forms (WiFiManager `/wifisave`, `s`/`p` + `extra` MQTT fields) with an `internet` option; AP mode gains NAT bridging to `eth0` (`ap_start internet=true`, FR-011) so a provisioned DUT reaches the LAN/internet; MQTT broker wired to the API (FR-029, `/api/mqtt/*`, `mqtt_controller.py`). SDR (FR-028) gains a `flex` `-X` custom-decoder param and `-M level` rssi/snr signal-vs-noise reporting. Test cases WT-1906–1908 (SDR flex/RSSI, RF path), WT-2000–2002 (broker), WT-2100–2102 (captive-portal provisioning). |
 | 9.4 | 2026-07-05 | Claude | SDR (FR-028) gains: fixed-gain (`-g`) + `peak_freq_hz`/`notch_hz` on power; phased `acquire` (locate→level→decode→classify) with `tools/sdr_acquire.py` CLI and live activity-log prompts; the interactive **live console** (persistent `rtl_433`, ring-buffer fast-poll `/api/sdr/live*`, RSSI meter, presets, `-A` in every mode so the signal meter is decode-independent); **AI Sherlock** session log (`/api/sdr/log*`) for AI reverse-engineering of unknown remotes; USB self-heal + `/api/sdr/reset`; and an `rtl_433` device database (`pi/config/rtl_433.conf`) shipping one worked-example decoder. New skill `sdr-receiver`. |
 | 9.5 | 2026-08-03 | Claude | MCP surface completed to 70 tools — added `firmware_upload/delete`, `udplog_get/clear`, `debug_group`, `test_update`, `wifi_events`, `human_interaction/done/cancel`; `DELETE` added as a transport method. Only the two udev callbacks (`/api/hotplug`, `/api/wifi/lease_event`) remain unexposed. |
-| 10.1 | 2026-11-13 | Claude | Findings from a project's DUT testing (ESP32-S3 captive-portal lift controller): FR-040 DNS query over the radio (new, `dns_probe.py`) — the relay resolves names through `eth0`, so a DUT's DNS server was unobservable; FR-014 relay gains `follow_redirects: false` so a 302 is visible; FR-039 port scan accepts the joined AP in station mode (a DUT that *is* the AP at 192.168.4.1 was refused as "the testbench itself"); serial ring buffer 1000 → 10 000 lines per slot (1000 lines covered ~5 min of a busy DUT log); `install.sh` unblocks the WLAN radio, not only Bluetooth. MCP 75 tools (`wifi_dns`). |
+| 10.1 | 2026-11-13 | Claude | Findings from a project's DUT testing (ESP32-S3 captive-portal lift controller): FR-040 DNS query over the radio (new, `dns_probe.py`) — the relay resolves names through `eth0`, so a DUT's DNS server was unobservable; FR-014 relay gains `follow_redirects: false` so a 302 is visible; FR-039 port scan accepts the joined AP in station mode and gains `protocol: udp` (a DUT that *is* the AP at 192.168.4.1 was refused as "the testbench itself"); serial ring buffer 1000 → 10 000 lines per slot (1000 lines covered ~5 min of a busy DUT log); `install.sh` unblocks the WLAN radio, not only Bluetooth. MCP 75 tools (`wifi_dns`). |
 | 10.0 | 2026-08-03 | Claude | Documentation consolidated to two documents: this FSD (WHAT) and the User Manual (HOW). The separate user manual, WiFi HTTP manual, skill-testing guide, and the `pi/` and `mcp/` READMEs merged into `Harness-User-Manual.md`; root `README.md` reduced to a landing page. FSD sections regrouped by subsystem — FR-017–FR-021 out of "WiFi Service" into §5, BLE + MQTT into §6, the three GDB specs into §7, signal generator + SDR into §8, and the MCP interface promoted out of FR-006 into §9. FR numbers and clause text unchanged. |
 
 ---

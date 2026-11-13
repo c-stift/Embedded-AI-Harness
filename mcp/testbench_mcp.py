@@ -187,7 +187,8 @@ SPECS = [
     dict(name="net_portscan", method="POST", path="/api/net/portscan",
          desc="TCP connect check of one host on the AP subnet (not the Pi), or in station mode of the joined AP; "
               "returns ports that accept a connection.",
-         props=p(host=S_STR, ports=dict(**S_STR, default="1-65535"), timeout_s=dict(**S_NUM, default=120)),
+         props=p(host=S_STR, ports=dict(**S_STR, default="1-65535"), timeout_s=dict(**S_NUM, default=120),
+                 protocol=dict(**S_STR, default="tcp")),
          required=["host"], timeout=620),
 
     dict(name="ble_status", method="GET", path="/api/ble/status", desc="BLE bridge state."),

@@ -269,10 +269,11 @@ class TestbenchDriver:
 
     # ── AP network port scan (FR-039) ─────────────────────────────────
 
-    def net_portscan(self, host: str, ports: str = "1-65535", timeout_s: float = 120) -> dict:
-        """TCP connect check of one AP-network host; returns open ports."""
+    def net_portscan(self, host: str, ports: str = "1-65535", timeout_s: float = 120,
+                     protocol: str = "tcp") -> dict:
+        """TCP connect check (or UDP probe) of one AP-network host; returns open ports."""
         return self._api_post("/api/net/portscan",
-                              {"host": host, "ports": ports, "timeout_s": timeout_s},
+                              {"host": host, "ports": ports, "timeout_s": timeout_s, "protocol": protocol},
                               timeout=timeout_s + 15)
 
     # ── Captive-portal provisioning (FR-012 composite) ────────────────

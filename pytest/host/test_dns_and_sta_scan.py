@@ -111,3 +111,14 @@ def test_fr014_no_redirect_handler_declines_every_redirect():
 def test_fr014_relay_defaults_to_following():
     import inspect
     assert inspect.signature(wc.http_relay).parameters["follow_redirects"].default is True
+
+
+@pytest.mark.parametrize("value,want", [("tcp", "tcp"), ("udp", "udp"), (None, "tcp")])
+def test_fr039_parses_protocol(value, want):
+    assert ns.parse_protocol(value) == want
+
+
+@pytest.mark.parametrize("value", ["icmp", "TCP", "", 1])
+def test_fr039_rejects_unknown_protocol(value):
+    with pytest.raises(ValueError):
+        ns.parse_protocol(value)

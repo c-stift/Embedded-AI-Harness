@@ -4005,11 +4005,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ports = netscan_controller.parse_ports(
                 body.get("ports", netscan_controller.DEFAULT_PORTS))
             timeout_s = netscan_controller.clamp_timeout(body.get("timeout_s"))
+            protocol = netscan_controller.parse_protocol(body.get("protocol"))
         except ValueError as exc:
             self._send_json({"ok": False, "error": str(exc)}, 400)
             return
-        log_activity(f"portscan {host}: {len(ports)} port(s), budget {timeout_s:g} s", "step")
-        res = netscan_controller.scan(host, ports, timeout_s)
+        log_activity(f"portscan {protocol} {host}: {len(ports)} port(s), budget {timeout_s:g} s", "step")
+        res = netscan_controller.scan(host, ports, timeout_s, protocol)
         log_activity(f"portscan {host}: open={res['open']} complete={res['complete']}", "ok")
         self._send_json({"ok": True, **res})
 
