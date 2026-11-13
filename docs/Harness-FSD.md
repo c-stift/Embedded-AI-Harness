@@ -8,7 +8,7 @@
 | 2 | [Definitions](#2-definitions) | Terms and the slot-based identity principle |
 | 3 | [Serial Interface](#3-serial-interface) | FR-001 – FR-009: hotplug, slots, serial API, RFC2217, reset, monitor, flap recovery · FR-030 serial write · FR-031 – FR-035 access manager · FR-036 bench reset |
 | 4 | [WiFi Service](#4-wifi-service) | FR-010 – FR-016: AP, STA, scan, HTTP relay, events, mode switching |
-| 5 | [Device Control & Test Support](#5-device-control--test-support) | FR-017 – FR-021: operator prompts, GPIO, test progress, UDP logs, OTA repository · FR-038 untrusted HTTPS mirror · FR-039 AP port scan |
+| 5 | [Device Control & Test Support](#5-device-control--test-support) | FR-017 – FR-021: operator prompts, GPIO, test progress, UDP logs, OTA repository · FR-038 untrusted HTTPS mirror · FR-039 AP port scan · FR-040 DNS query |
 | 6 | [Peripheral Bridges](#6-peripheral-bridges) | FR-022, FR-029: BLE proxy, MQTT test broker |
 | 7 | [Debug Services](#7-debug-services) | FR-024 – FR-026, FR-037: USB JTAG, dual-USB, ESP-Prog, per-slot isolation |
 | 8 | [RF Instruments](#8-rf-instruments) | FR-027, FR-028: signal generator, SDR receiver |
@@ -1362,7 +1362,8 @@ serial-interface mode.
 | POST | /api/wifi/sta_join | Join WiFi network as station (WiFi state → Captive) |
 | POST | /api/wifi/sta_leave | Disconnect from WiFi network (WiFi state → Idle) |
 | GET | /api/wifi/scan | Scan for WiFi networks |
-| POST | /api/wifi/http | HTTP relay through Pi's radio |
+| POST | /api/wifi/http | HTTP relay through Pi's radio (FR-014; `follow_redirects`) |
+| POST | /api/wifi/dns | DNS query over the radio (FR-040) |
 | GET | /api/wifi/events | Event queue (long-poll supported) |
 | POST | /api/wifi/lease_event | Receive dnsmasq lease callback |
 | **Human Interaction** | | |
@@ -1566,6 +1567,20 @@ WiFi side of the network:
 - Returns `{status, headers, body}`
 - Works in both AP mode (reaching devices at 192.168.4.x) and STA mode
   (reaching the external network)
+- Redirects are followed by default, like a browser. `follow_redirects: false`
+  returns a 3xx as it arrived — status and `Location` header — because a test
+  of a captive portal has to see *that* the device redirects and *where to*;
+  a followed redirect shows only the page at the end of it.
+- The relay resolves host names on the Pi (through `eth0`), never through the
+  DUT. A DUT's own DNS server is observed with FR-040.
+
+**Verification contract**
+
+| ID | Precondition · stimulus | Expected observation | Must NOT happen | Tier |
+|---|---|---|---|---|
+| FR-014 | A device answering `/r` with 302 `Location: /x` · relay with `follow_redirects: false` | `status: 302` and the `Location` header | The body of `/x` |
+| FR-014 | The same · relay without the field | `status` and body of `/x` | A 302 returned |
+| FR-014 | `follow_redirects: "no"` | 400, nothing relayed | A request sent with a guessed value |
 
 ### FR-015 — Event System
 
@@ -2001,7 +2016,7 @@ observe.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| host | string | required | A single IPv4 address inside the AP subnet (`192.168.4.0/24`), not the Pi's own AP address |
+| host | string | required | AP mode: a single IPv4 address inside the AP subnet (`192.168.4.0/24`), not the Pi's own AP address. Station mode: the AP the bench joined (its gateway) |
 | ports | string | `"1-65535"` | Comma-separated ports and ranges, e.g. `"22,80,1000-2000"`; each 1–65535 |
 | timeout_s | number | 120 | Total time budget, 1–600 s |
 
@@ -2014,8 +2029,11 @@ observe.
 
 **Limits — enforced before any connection is made:**
 
-- The target is one IPv4 address inside the AP subnet and is not the Pi
-  itself. Anything else — a LAN address, a hostname, a network range, the
+- AP mode: the target is one IPv4 address inside the AP subnet and is not
+  the Pi itself. Station mode (FR-012 — the bench joined a DUT's own access
+  point, which is then commonly `192.168.4.1`): the only target is that access
+  point, the gateway the join returned; every other address on that network,
+  and the bench's own station address, is refused. Anything else — a LAN address, a hostname, a network range, the
   broadcast or network address — is refused with 400 and no connection
   attempt. The bench cannot be used to probe the owner's LAN.
 - Each port is checked with a plain TCP connect (connect, then close). No
@@ -2037,6 +2055,53 @@ wt.net_portscan("192.168.4.15", ports="1-65535", timeout_s=120)
 | FR-039 | A refused target · request | 400, and no connection attempted | A connection attempt before validation |
 | FR-039 | A host listening on known ports · scan those ports plus closed ones | `open` lists exactly the listening ports | A closed port reported open |
 | FR-039 | Budget shorter than the scan needs | `complete: false`, answer within budget + 2 s | The request running past its budget |
+| FR-039 | Station mode, joined AP `192.168.4.1`, own address `192.168.4.2` · validate `192.168.4.1`, `192.168.4.2`, `192.168.4.3`, `192.168.0.10` | Only the first is accepted | The bench's own address or another host accepted |
+| FR-039 | Station mode without a gateway · validate any target | Refused | A scan |
+
+### FR-040 — DNS Query over the Radio
+
+Send **one DNS query over UDP from the bench radio** to a device on the WiFi
+side and report its answer. A captive-portal DUT must answer every name with
+its own address; the HTTP relay cannot show that, because it resolves names on
+the Pi through `eth0` and never asks the DUT (FR-014).
+
+**Endpoint:** `POST /api/wifi/dns`
+
+**Request:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| name | string | required | The name to resolve, e.g. `example.com` |
+| server | string | the joined AP | The DNS server to ask; the same target rules as FR-039 (station mode: only the joined AP; AP mode: a device on the AP subnet, not the Pi) |
+| type | string | `"A"` | `A`, `AAAA`, `CNAME`, `TXT` or `ANY` |
+| timeout_s | number | 3 | Wait for the reply, 0.5–10 s |
+
+**Response:**
+```json
+{"ok": true, "server": "192.168.4.1", "name": "example.com", "type": "A", "timeout": false,
+ "elapsed_ms": 12, "rcode": "NOERROR", "authoritative": false,
+ "answers": [{"name": "example.com", "type": "A", "ttl": 60, "data": "192.168.4.1"}]}
+```
+No reply within the budget is an observation too: `ok: true, timeout: true`.
+A device that runs no DNS server is exactly what some tests need to see; it is
+never reported as a bench fault.
+
+**Limits:** one query, one datagram, sent from the radio's own address; the
+server is validated before anything is sent, so the endpoint cannot ask a host
+on the owner's LAN.
+
+**Driver method:** `wt.wifi_dns("example.com")`
+
+**Verification contract**
+
+| ID | Precondition · stimulus | Expected observation | Must NOT happen | Tier |
+|---|---|---|---|---|
+| FR-040 | Build a query for `example.com`, type A, id 0x1234 | Header id 0x1234, RD set, one question, labels `7example3com0`, QTYPE 1, QCLASS 1 | Any other encoding |
+| FR-040 | Names `""`, a 64-byte label, a 256-byte name; type `MX` | Rejected before sending | A datagram for an invalid query |
+| FR-040 | A reply with a compressed answer name and an A record | `answers` carries the name and the dotted address | A wrong or missing address |
+| FR-040 | A reply with another id, or with QR clear | Rejected | Taken as the answer |
+| FR-040 | Station mode on a captive-portal DUT · query `example.com` | `rcode: NOERROR`, one A answer with the DUT's address | `timeout: true` while the DUT runs a DNS server |
+| FR-040 | Server outside the FR-039 target rules | 400, nothing sent | A datagram to that server |
 
 ## 6. Peripheral Bridges
 
@@ -3297,7 +3362,7 @@ How clients other than raw HTTP reach the API.
 
 An MCP (Model Context Protocol) server (`mcp/testbench_mcp.py`) exposes the HTTP
 API as MCP tools, so an MCP client (Claude Desktop, Claude Code, …) can drive the
-bench directly. It is a thin **stdio proxy** — 70 tools, one per endpoint, held
+bench directly. It is a thin **stdio proxy** — 75 tools, one per endpoint, held
 in a single `SPECS` table that mirrors the API: `GET` args become query params,
 `POST`/`DELETE` args a JSON body, and `flash`/`ota`/`firmware_upload` upload local
 files. Adding an API endpoint is one row in `SPECS`. The two udev callbacks
@@ -3325,7 +3390,7 @@ claude mcp add testbench --env TESTBENCH_URL=http://<host>:8080 \
 claude mcp list      # → testbench … ✔ Connected
 ```
 
-The health check completes the MCP handshake and enumerates all 70 tools; live
+The health check completes the MCP handshake and enumerates all 75 tools; live
 tool calls (`sdr_status`, `testbench_devices`, `mqtt_status`, …) return real
 bench data. Tools surface to the client as `mcp__testbench__<name>`.
 
@@ -3728,6 +3793,7 @@ Add `--run-dut` to include tests that require a WiFi device under test.
 | 9.3 | 2026-07-05 | Claude | Captive-portal provisioning + LAN bridge, verified against a WiFiManager DUT. `enter-portal` parameterized for arbitrary portal forms (WiFiManager `/wifisave`, `s`/`p` + `extra` MQTT fields) with an `internet` option; AP mode gains NAT bridging to `eth0` (`ap_start internet=true`, FR-011) so a provisioned DUT reaches the LAN/internet; MQTT broker wired to the API (FR-029, `/api/mqtt/*`, `mqtt_controller.py`). SDR (FR-028) gains a `flex` `-X` custom-decoder param and `-M level` rssi/snr signal-vs-noise reporting. Test cases WT-1906–1908 (SDR flex/RSSI, RF path), WT-2000–2002 (broker), WT-2100–2102 (captive-portal provisioning). |
 | 9.4 | 2026-07-05 | Claude | SDR (FR-028) gains: fixed-gain (`-g`) + `peak_freq_hz`/`notch_hz` on power; phased `acquire` (locate→level→decode→classify) with `tools/sdr_acquire.py` CLI and live activity-log prompts; the interactive **live console** (persistent `rtl_433`, ring-buffer fast-poll `/api/sdr/live*`, RSSI meter, presets, `-A` in every mode so the signal meter is decode-independent); **AI Sherlock** session log (`/api/sdr/log*`) for AI reverse-engineering of unknown remotes; USB self-heal + `/api/sdr/reset`; and an `rtl_433` device database (`pi/config/rtl_433.conf`) shipping one worked-example decoder. New skill `sdr-receiver`. |
 | 9.5 | 2026-08-03 | Claude | MCP surface completed to 70 tools — added `firmware_upload/delete`, `udplog_get/clear`, `debug_group`, `test_update`, `wifi_events`, `human_interaction/done/cancel`; `DELETE` added as a transport method. Only the two udev callbacks (`/api/hotplug`, `/api/wifi/lease_event`) remain unexposed. |
+| 10.1 | 2026-11-13 | Claude | Findings from a project's DUT testing (ESP32-S3 captive-portal lift controller): FR-040 DNS query over the radio (new, `dns_probe.py`) — the relay resolves names through `eth0`, so a DUT's DNS server was unobservable; FR-014 relay gains `follow_redirects: false` so a 302 is visible; FR-039 port scan accepts the joined AP in station mode (a DUT that *is* the AP at 192.168.4.1 was refused as "the testbench itself"); serial ring buffer 1000 → 10 000 lines per slot (1000 lines covered ~5 min of a busy DUT log); `install.sh` unblocks the WLAN radio, not only Bluetooth. MCP 75 tools (`wifi_dns`). |
 | 10.0 | 2026-08-03 | Claude | Documentation consolidated to two documents: this FSD (WHAT) and the User Manual (HOW). The separate user manual, WiFi HTTP manual, skill-testing guide, and the `pi/` and `mcp/` READMEs merged into `Harness-User-Manual.md`; root `README.md` reduced to a landing page. FSD sections regrouped by subsystem — FR-017–FR-021 out of "WiFi Service" into §5, BLE + MQTT into §6, the three GDB specs into §7, signal generator + SDR into §8, and the MCP interface promoted out of FR-006 into §9. FR numbers and clause text unchanged. |
 
 ---
@@ -3976,7 +4042,7 @@ errors add `"error": "..."`.
 |--------|----------|-------------|
 | POST | `/api/serial/reset` | Reset a device `{"slot"}`. **The method depends on the slot; the response shape does not.** `output` is always the device's boot lines. No debug session: DTR/RTS, stopping and restarting the proxy. Debug session active: JTAG `reset run` — no USB re-enumeration, proxy stays up — and the reply adds `"method": "jtag"`, `"command"` and `"openocd"` carrying OpenOCD's own text. Falls back to DTR/RTS if the JTAG reset fails |
 | POST | `/api/serial/monitor` | Wait for a pattern `{"slot", "pattern?", "timeout?"}` → `{"ok", "matched", "line", "output"}` |
-| GET | `/api/serial/output` | Passive buffer read `?slot=&lines=&since=` |
+| GET | `/api/serial/output` | Passive buffer read `?slot=&lines=&since=`; each slot keeps its last 10 000 lines |
 | POST | `/api/serial/write` | Send bytes `{"slot", "text"\|"hex", "newline?"}` → `{"ok", "written"}` (FR-030) |
 | POST | `/api/serial/recover` | Manual flap-recovery trigger `{"slot"}`. Reports the *attempt*; the outcome appears in `/api/devices` as `download_mode` or `flapping` + `last_error` |
 | POST | `/api/serial/gpio-test` | Measure whether BOOT/EN are physically wired to this slot's board `{"slot"}` → `{en_wired, boot_wired, detail}` |
@@ -4026,7 +4092,8 @@ AP and STA modes are mutually exclusive.
 | GET | `/api/wifi/ap_status` | `{"active", "ssid", "channel", "stations": [{"mac", "ip"}, ...]}` |
 | POST | `/api/wifi/sta_join` · `sta_leave` | Join / leave a network `{"ssid", "pass?"}` |
 | GET | `/api/wifi/scan` | Scan nearby WiFi networks |
-| POST | `/api/wifi/http` | HTTP relay through wlan0 `{"method", "url", "headers?", "body?"}` |
+| POST | `/api/wifi/http` | HTTP relay through wlan0 `{"method", "url", "headers?", "body?", "follow_redirects?"}` |
+| POST | `/api/wifi/dns` | DNS query over wlan0 `{"name", "server?", "type?", "timeout_s?"}` (FR-040) |
 | GET | `/api/wifi/events` | Long-poll station events `?timeout=` |
 | GET | `/api/wifi/ping` | Version and uptime. Answers in either mode, so it is the reachability probe |
 | POST | `/api/wifi/lease_event` | dnsmasq lease hook `{"action", "mac", "ip", "hostname"}` — called by the Pi, not by clients |

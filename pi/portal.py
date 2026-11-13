@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, urlparse
 import debug_controller
 import gpiod
 import mqtt_controller
+import dns_probe
 import netscan_controller
 import tls_mirror_controller
 import wifi_controller
@@ -155,7 +156,7 @@ FIRMWARE_DIR = os.environ.get("FIRMWARE_DIR", "/var/lib/rfc2217/firmware")
 ESPOTA_PATH = os.environ.get("ESPOTA_PATH", "/usr/local/bin/espota.py")
 
 # Serial buffer size — how many lines each slot's ring buffer keeps
-SERIAL_BUF_MAXLEN = 1000
+SERIAL_BUF_MAXLEN = 10000
 
 
 
@@ -2847,6 +2848,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_wifi_sta_leave()
         elif path == "/api/wifi/http":
             self._handle_wifi_http()
+        elif path == "/api/wifi/dns":
+            self._handle_wifi_dns()
         elif path == "/api/wifi/lease_event":
             self._handle_wifi_lease_event()
         elif path == "/api/human-interaction":
@@ -3386,9 +3389,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         headers = body.get("headers")
         req_body = body.get("body")  # base64 encoded
         timeout = body.get("timeout", 10)
+        follow = body.get("follow_redirects", True)
+        if not isinstance(follow, bool):
+            self._send_json({"ok": False, "error": "follow_redirects must be true or false"}, 400)
+            return
         log_activity(f"HTTP relay {method} {url}", "step")
         try:
-            result = wifi_controller.http_relay(method, url, headers, req_body, timeout)
+            result = wifi_controller.http_relay(method, url, headers, req_body, timeout, follow)
             log_activity(f"HTTP relay {method} {url} — {result.get('status', '?')}", "ok")
             self._send_json({"ok": True, **result})
         except Exception as e:
@@ -3993,8 +4000,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _handle_net_portscan(self):
         try:
             body = self._read_json() or {}
-            host = netscan_controller.validate_target(
-                body.get("host"), wifi_controller.AP_SUBNET, wifi_controller.AP_IP)
+            host = netscan_controller.select_target(
+                body.get("host"), wifi_controller.sta_info(), wifi_controller.AP_SUBNET, wifi_controller.AP_IP)
             ports = netscan_controller.parse_ports(
                 body.get("ports", netscan_controller.DEFAULT_PORTS))
             timeout_s = netscan_controller.clamp_timeout(body.get("timeout_s"))
@@ -4004,6 +4011,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
         log_activity(f"portscan {host}: {len(ports)} port(s), budget {timeout_s:g} s", "step")
         res = netscan_controller.scan(host, ports, timeout_s)
         log_activity(f"portscan {host}: open={res['open']} complete={res['complete']}", "ok")
+        self._send_json({"ok": True, **res})
+
+    # -- DNS probe from the radio (FR-040) --
+
+    def _handle_wifi_dns(self):
+        try:
+            body = self._read_json() or {}
+            sta = wifi_controller.sta_info()
+            server = body.get("server") or sta.get("gateway") or ""
+            server = netscan_controller.select_target(
+                server, sta, wifi_controller.AP_SUBNET, wifi_controller.AP_IP)
+            name = body.get("name", "")
+            qtype = body.get("type", "A")
+            dns_probe.build_query(name, qtype)  # validates name and type before anything is sent
+            timeout_s = dns_probe.clamp_timeout(body.get("timeout_s"))
+        except ValueError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, 400)
+            return
+        source = sta["ip"] if sta.get("active") else wifi_controller.AP_IP
+        log_activity(f"DNS {qtype} {name} @ {server}", "step")
+        try:
+            res = dns_probe.query(server, name, qtype, source, timeout_s)
+        except (OSError, ValueError) as exc:
+            log_activity(f"DNS {name} @ {server} failed: {exc}", "error")
+            self._send_json({"ok": False, "error": str(exc)})
+            return
+        log_activity(f"DNS {name} @ {server}: {res.get('rcode', 'timeout')} "
+                     f"{[a['data'] for a in res.get('answers', [])]}", "ok")
         self._send_json({"ok": True, **res})
 
     # -- firmware handlers --

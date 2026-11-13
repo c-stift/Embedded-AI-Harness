@@ -155,8 +155,14 @@ SPECS = [
     dict(name="wifi_sta_leave", method="POST", path="/api/wifi/sta_leave", desc="Leave the joined network."),
     dict(name="wifi_http", method="POST", path="/api/wifi/http",
          desc="Relay an HTTP request to a device on the test network.",
-         props=p(method=dict(**S_STR, default="GET"), url=S_STR, timeout=dict(**S_INT, default=10)),
+         props=p(method=dict(**S_STR, default="GET"), url=S_STR, timeout=dict(**S_INT, default=10),
+                 follow_redirects=dict(**S_BOOL, default=True)),
          required=["url"], timeout=40),
+    dict(name="wifi_dns", method="POST", path="/api/wifi/dns",
+         desc="Send one DNS query over the bench radio to a device on the WiFi side (default: the AP the bench "
+              "joined) and return rcode and answers; timeout:true when nothing answered.",
+         props=p(name=S_STR, server=S_STR, type=dict(**S_STR, default="A"), timeout_s=dict(**S_NUM, default=3)),
+         required=["name"], timeout=20),
     dict(name="wifi_ping", method="GET", path="/api/wifi/ping", desc="WiFi reachability check."),
     dict(name="wifi_events", method="GET", path="/api/wifi/events",
          desc="Long-poll station join/leave events on the SoftAP (DHCP leases). "
@@ -179,7 +185,8 @@ SPECS = [
          desc="Serve the firmware repository on 8443 with a self-signed certificate (a TLS peer a DUT must refuse).", timeout=90),
     dict(name="tls_mirror_stop", method="POST", path="/api/tls-mirror/stop", desc="Stop the untrusted HTTPS mirror."),
     dict(name="net_portscan", method="POST", path="/api/net/portscan",
-         desc="TCP connect check of one host on the AP subnet (not the Pi); returns ports that accept a connection.",
+         desc="TCP connect check of one host on the AP subnet (not the Pi), or in station mode of the joined AP; "
+              "returns ports that accept a connection.",
          props=p(host=S_STR, ports=dict(**S_STR, default="1-65535"), timeout_s=dict(**S_NUM, default=120)),
          required=["host"], timeout=620),
 

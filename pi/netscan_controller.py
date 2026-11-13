@@ -3,8 +3,9 @@ Netscan Controller — TCP connect check of one host on the bench AP network
 (FR-039).
 
 Verifies a DUT's claim that it exposes no listening service. The target rules
-are enforced in `validate_target` before any connection is made: a single IPv4
-address inside the AP subnet, never the Pi itself. The caller (the portal, as
+are enforced in `select_target` before any connection is made: in AP mode a
+single IPv4 address inside the AP subnet, never the Pi itself; in station mode
+(the bench joined a DUT's own AP) only that AP. The caller (the portal, as
 composition root) supplies the subnet and the Pi's AP address, so this module
 does not depend on the WiFi controller.
 """
@@ -49,6 +50,31 @@ def validate_target(host, subnet: str, self_ip: str) -> str:
     if addr == ipaddress.IPv4Address(self_ip):
         raise ValueError(f"host {addr} is the testbench itself")
     return str(addr)
+
+
+def validate_sta_target(host, gateway: str, self_ip: str) -> str:
+    """Station mode: the bench has joined a device's own AP, so the one host it may scan is that AP (the
+    gateway it was given), never itself and nothing else on that network."""
+    if not gateway:
+        raise ValueError("station mode without a gateway: nothing to scan")
+    if not isinstance(host, str) or "/" in host:
+        raise ValueError("host must be a single IPv4 address")
+    try:
+        addr = ipaddress.IPv4Address(host.strip())
+    except ipaddress.AddressValueError:
+        raise ValueError("host must be a single IPv4 address") from None
+    if self_ip and addr == ipaddress.IPv4Address(self_ip):
+        raise ValueError(f"host {addr} is the testbench itself")
+    if addr != ipaddress.IPv4Address(gateway):
+        raise ValueError(f"in station mode only the joined AP {gateway} may be scanned")
+    return str(addr)
+
+
+def select_target(host, sta: dict, ap_subnet: str, ap_ip: str) -> str:
+    """AP mode: a device on the bench AP's subnet (validate_target). Station mode: the joined AP."""
+    if sta.get("active"):
+        return validate_sta_target(host, sta.get("gateway", ""), sta.get("ip", ""))
+    return validate_target(host, ap_subnet, ap_ip)
 
 
 def parse_ports(spec) -> list:

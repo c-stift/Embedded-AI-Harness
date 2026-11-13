@@ -76,6 +76,8 @@ _ap_dnsmasq_proc = None
 
 _sta_active = False
 _sta_ssid = ""
+_sta_ip = ""       # the bench's own address on the joined network
+_sta_gateway = ""  # the AP it joined (a DUT acting as access point)
 _sta_wpa_proc = None
 _saved_ap = None  # saved AP config to restore after sta_leave
 
@@ -583,7 +585,7 @@ def handle_lease_event(action, mac, ip, hostname=""):
 
 def sta_join(ssid, password="", timeout=15, _internal=False):
     """Join a WiFi network as a station. Returns dict with ip, gateway."""
-    global _sta_active, _sta_ssid, _sta_wpa_proc, _saved_ap
+    global _sta_active, _sta_ssid, _sta_wpa_proc, _saved_ap, _sta_ip, _sta_gateway
 
     if not _internal:
         _check_wifi_testing_mode()
@@ -730,6 +732,7 @@ def sta_join(ssid, password="", timeout=15, _internal=False):
 
         _sta_active = True
         _sta_ssid = ssid
+        _sta_ip, _sta_gateway = ip_addr, gateway
         logger.info("STA joined: ssid=%s ip=%s gw=%s", ssid, ip_addr, gateway)
         return {"ip": ip_addr, "gateway": gateway}
 
@@ -747,8 +750,16 @@ def sta_leave():
         ap_start(saved["ssid"], password=saved["password"], channel=saved["channel"])
 
 
+def sta_info():
+    """The joined network as {active, ssid, ip, gateway}; ip/gateway empty when not joined."""
+    with _lock:
+        if not _sta_active:
+            return {"active": False, "ssid": "", "ip": "", "gateway": ""}
+        return {"active": True, "ssid": _sta_ssid, "ip": _sta_ip, "gateway": _sta_gateway}
+
+
 def _sta_stop_unlocked():
-    global _sta_active, _sta_ssid, _sta_wpa_proc
+    global _sta_active, _sta_ssid, _sta_wpa_proc, _sta_ip, _sta_gateway
 
     if _sta_wpa_proc is not None:
         _kill_proc(_sta_wpa_proc)
@@ -790,6 +801,7 @@ def _sta_stop_unlocked():
     _flush_addr()
     _sta_active = False
     _sta_ssid = ""
+    _sta_ip = _sta_gateway = ""
     logger.info("STA disconnected")
 
 
@@ -941,8 +953,21 @@ def scan():
 # HTTP Relay
 # ---------------------------------------------------------------------------
 
-def http_relay(method, url, headers=None, body=None, timeout=10):
-    """Perform an HTTP request from the Pi. Returns dict with status, headers, body."""
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Hand a 3xx back to the caller instead of following it (FR-014 `follow_redirects: false`)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_no_redirect_opener = urllib.request.build_opener(_NoRedirect)
+
+
+def http_relay(method, url, headers=None, body=None, timeout=10, follow_redirects=True):
+    """Perform an HTTP request from the Pi. Returns dict with status, headers, body.
+
+    follow_redirects=False returns a 3xx as it arrived (status and Location header), so a test can see that a
+    device redirects and where to; by default the relay follows redirects like a browser."""
     _check_wifi_testing_mode()
     req_headers = headers or {}
     body_bytes = None
@@ -957,7 +982,8 @@ def http_relay(method, url, headers=None, body=None, timeout=10):
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        opener = urllib.request.urlopen if follow_redirects else _no_redirect_opener.open
+        with opener(req, timeout=timeout) as resp:
             resp_body = resp.read()
             resp_headers = dict(resp.getheaders())
             return {

@@ -225,14 +225,23 @@ class TestbenchDriver:
 
     def wifi_http(self, url: str, method: str = "GET",
                   headers: Optional[dict] = None, body: str = None,
-                  timeout: int = 8) -> dict:
-        """Relay an HTTP request through the Pi's radio to a device on its net."""
-        args = {"method": method, "url": url, "timeout": timeout}
+                  timeout: int = 8, follow_redirects: bool = True) -> dict:
+        """Relay an HTTP request through the Pi's radio to a device on its net.
+
+        follow_redirects=False returns a 3xx as it arrived (status, Location header)."""
+        args = {"method": method, "url": url, "timeout": timeout, "follow_redirects": follow_redirects}
         if headers:
             args["headers"] = headers
         if body is not None:
             args["body"] = body
         return self._api_post("/api/wifi/http", args, timeout=timeout + 5)
+
+    def wifi_dns(self, name: str, server: str = None, qtype: str = "A", timeout_s: float = 3) -> dict:
+        """One DNS query over the radio (FR-040); default server is the AP the bench joined."""
+        args = {"name": name, "type": qtype, "timeout_s": timeout_s}
+        if server:
+            args["server"] = server
+        return self._api_post("/api/wifi/dns", args, timeout=timeout_s + 10)
 
     # ── MQTT broker (FR-029) ──────────────────────────────────────────
 

@@ -45,6 +45,10 @@ if [ "$UPDATE_ONLY" = false ]; then
     # which leaves hci0 DOWN and every /api/ble/* call failing. Unblock once —
     # systemd-rfkill persists the state across reboots.
     rfkill unblock bluetooth 2>/dev/null || true
+    # The same image can soft-block the WLAN radio, which leaves wlan0 down
+    # ("Network is down") and every /api/wifi/* call failing the same way.
+    rfkill unblock wifi 2>/dev/null || true
+    nmcli radio wifi on 2>/dev/null || true
     hciconfig hci0 up 2>/dev/null || true
 
     # OpenOCD for ESP32 (GDB debug support)
@@ -139,6 +143,7 @@ cp "$SCRIPT_DIR/sdr_controller.py"          /usr/local/bin/sdr_controller.py
 cp "$SCRIPT_DIR/debug_controller.py"       /usr/local/bin/debug_controller.py
 cp "$SCRIPT_DIR/mqtt_controller.py"         /usr/local/bin/mqtt_controller.py
 cp "$SCRIPT_DIR/netscan_controller.py"      /usr/local/bin/netscan_controller.py
+cp "$SCRIPT_DIR/dns_probe.py"               /usr/local/bin/dns_probe.py
 cp "$SCRIPT_DIR/tls_mirror_controller.py"   /usr/local/bin/tls_mirror_controller.py
 cp "$SCRIPT_DIR/sniffer.py"                 /usr/local/bin/sniffer.py
 cp "$SCRIPT_DIR/rfc2217-learn-slots"        /usr/local/bin/rfc2217-learn-slots
