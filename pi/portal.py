@@ -1509,6 +1509,19 @@ def jtag_reset_capturing(slot: dict, effective_label: str,
 
 
 
+def serial_tail(buf, since: float, max_lines: int) -> list:
+    """The newest `max_lines` entries of a slot's ring buffer with `ts` > since.
+
+    The recorder thread appends while a reader filters; iterating the deque
+    itself raised "deque mutated during iteration" and killed the request
+    (the client saw the connection close without a response). `list(buf)`
+    copies in one C call under the GIL, so the copy is consistent; the
+    filtering then runs on the copy. A 10 000-line buffer made the race
+    frequent enough to fail a long test run."""
+    fresh = [e for e in list(buf) if e["ts"] > since]
+    return fresh[-max_lines:] if max_lines > 0 else []
+
+
 def _start_recorder(slot: dict) -> None:
     """Keep a slot's ring buffer filled whenever its proxy is up.
 
@@ -3666,8 +3679,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # survived because a buffer shorter than `lines` is returned whole, so
         # the read right after a flash — when tests do most of their reading —
         # was correct, and only a long-running slot lied.
-        fresh = [e for e in slot["_serial_buf"] if e["ts"] > since]
-        self._send_json({"ok": True, "lines": fresh[-max_lines:]})
+        self._send_json({"ok": True, "lines": serial_tail(slot["_serial_buf"], since, max_lines)})
 
     # -- recovery handlers --
 
